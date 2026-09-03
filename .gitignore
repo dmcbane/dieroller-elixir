@@ -8,3 +8,9 @@ erl_crash.dump
 *.beam
 /config/*.secret.exs
 .elixir_ls/
+/burrito_out/
+/apps/*/_build
+/apps/*/deps
+*.csv
+/apps/dieroller_cli/dieroller
+/apps/pathfinder_cli/pathfinder-character
