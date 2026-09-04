@@ -2,45 +2,35 @@ defmodule DierollerCLI do
   @moduledoc """
   Command line entry point for `dieroller`.
 
+  The roll is described entirely by its dice expression, so the only options
+  left are the ones that are not part of a roll: how to present it, how to seed
+  it, and the two informational flags.
+
   `run/1` is pure apart from the RNG: it turns an argument list into either a
   lazy stream of output chunks or an error message. `main/1` is the only part
   that touches IO and process exit status, which keeps the whole CLI testable
-  in-process while letting `--iterations` stream rather than buffer.
+  in-process while letting a large repeat count stream rather than buffer.
   """
 
   alias Dice.{Expr, Notation, Spec}
   alias DierollerCLI.Help
 
+  @version Mix.Project.config()[:version]
+
   @hint "Try 'dieroller --help' for more information."
 
-  @switches [
-    verbose: :boolean,
-    dice: :integer,
-    keep: :integer,
-    modifier: :string,
-    sides: :integer,
-    iterations: :integer,
-    json: :boolean,
-    seed: :integer,
-    help: :boolean
-  ]
+  @switches [verbose: :boolean, json: :boolean, seed: :integer, help: :boolean, version: :boolean]
 
-  @aliases [
-    v: :verbose,
-    d: :dice,
-    k: :keep,
-    m: :modifier,
-    s: :sides,
-    i: :iterations,
-    j: :json,
-    h: :help
-  ]
+  @aliases [v: :verbose, j: :json, h: :help, V: :version]
+
+  # The <dice> <sides> <modifier> <keep> form these replaced.
+  @legacy ~r/^[-+*]?\d+$/
 
   @doc false
   def main(argv) do
     case run(argv) do
       {:ok, output} ->
-        Enum.each(output, &IO.write/1)
+        write(output)
 
       {:error, message} ->
         IO.puts(:stderr, message)
@@ -49,10 +39,18 @@ defmodule DierollerCLI do
     end
   end
 
+  # Writing to a closed pipe is how `dieroller ... | head` ends, and the shell
+  # convention is to stop quietly rather than report it as a failure.
+  defp write(output) do
+    Enum.each(output, &IO.write/1)
+  rescue
+    ErlangError -> :ok
+  end
+
   @doc """
   Turns an argument list into `{:ok, output}` or `{:error, message}`.
 
-  `output` is a lazy enumerable of chunks, so a large `--iterations` streams to
+  `output` is a lazy enumerable of chunks, so a large repeat count streams to
   the terminal instead of being built in memory first.
   """
   @spec run([String.t()]) :: {:ok, Enumerable.t()} | {:error, String.t()}
@@ -64,82 +62,63 @@ defmodule DierollerCLI do
   end
 
   defp dispatch(opts, args) do
-    if opts[:help] do
-      {:ok, [Help.text()]}
-    else
-      with {:ok, iterations} <- iterations(opts),
-           {:ok, expr} <- build_expr(opts, args) do
-        if seed = opts[:seed], do: Dice.seed(seed)
-        {:ok, render(expr, iterations, opts)}
-      end
+    cond do
+      opts[:help] -> {:ok, [Help.text()]}
+      opts[:version] -> {:ok, ["dieroller #{@version}\n"]}
+      true -> roll(opts, args)
     end
   end
 
-  defp iterations(opts) do
-    case Keyword.get(opts, :iterations, 1) do
-      n when n > 0 -> {:ok, n}
-      _ -> {:error, "iterations must be greater than 0."}
+  defp roll(opts, args) do
+    with {:ok, {repeat, expr}} <- expression(args) do
+      if seed = opts[:seed], do: Dice.seed(seed)
+      {:ok, render(expr, repeat, opts)}
     end
   end
 
-  # A leading positional in dice notation short-circuits the legacy form.
-  defp build_expr(opts, [first | rest] = args) do
-    if Notation.dice_like?(first) do
-      case rest do
-        [] -> Notation.parse(first)
-        extra -> {:error, "unexpected arguments after dice notation: #{Enum.join(extra, " ")}"}
-      end
-    else
-      with {:ok, spec} <- legacy_spec(opts, args), do: {:ok, Expr.from_spec(spec)}
+  defp expression([]), do: {:error, "no dice expression given."}
+
+  defp expression(args) do
+    cond do
+      # Caught before parsing so the old positional form gets a migration
+      # message rather than "expression contains no dice".
+      legacy_form?(args) -> {:error, legacy_hint(args)}
+      match?([_], args) -> Notation.parse_roll(hd(args))
+      true -> {:error, quoting_hint(args)}
     end
   end
 
-  defp build_expr(opts, []) do
-    with {:ok, spec} <- legacy_spec(opts, []), do: {:ok, Expr.from_spec(spec)}
+  defp legacy_form?(args) do
+    length(args) <= 4 and Enum.all?(args, &Regex.match?(@legacy, &1))
   end
 
-  # The original merged flags and positionals slot by slot, with positionals
-  # winning. Reproduced here so existing invocations behave identically.
-  defp legacy_spec(opts, args) do
-    with {:ok, dice} <- slot(args, 0, Keyword.get(opts, :dice, 1), "dice"),
-         {:ok, sides} <- slot(args, 1, Keyword.get(opts, :sides, 20), "sides"),
-         {:ok, modifier} <- modifier_slot(args, opts),
-         {:ok, keep} <- keep_slot(args, opts, dice) do
-      {op, amount} = modifier
-      Spec.new(dice: dice, sides: sides, keep: keep, op: op, amount: amount)
+  defp legacy_hint(args) do
+    "the <dice> <sides> <modifier> <keep> arguments have been replaced by dice" <>
+      " notation; try: dieroller #{suggestion(args)}"
+  end
+
+  # Rebuilds the old positional arguments as the equivalent expression.
+  defp suggestion([dice]), do: "#{dice}d20"
+  defp suggestion([dice, sides]), do: "#{dice}d#{sides}"
+  defp suggestion([dice, sides, modifier]), do: "#{dice}d#{sides}#{modifier_text(modifier)}"
+
+  defp suggestion([dice, sides, modifier, keep]),
+    do: "#{dice}d#{sides}k#{keep}#{modifier_text(modifier)}"
+
+  defp modifier_text(modifier) do
+    case Notation.parse_modifier(modifier) do
+      {:ok, {:+, 0}} -> ""
+      {:ok, {op, amount}} -> "#{op}#{amount}"
+      {:error, _} -> ""
     end
   end
 
-  defp slot(args, index, default, name) do
-    case Enum.at(args, index) do
-      nil -> {:ok, default}
-      raw -> integer(raw, name)
-    end
+  defp quoting_hint(args) do
+    ~s(a roll is one argument; quote the whole expression, ) <>
+      ~s(for example: dieroller "#{Enum.join(args, " ")}")
   end
 
-  defp modifier_slot(args, opts) do
-    Notation.parse_modifier(Enum.at(args, 2) || Keyword.get(opts, :modifier, "0"))
-  end
-
-  defp keep_slot(args, opts, dice) do
-    case Enum.at(args, 3) do
-      # The original used 0 as a sentinel for "--keep not given" and silently
-      # rewrote it to `dice`. OptionParser reports absence directly, so an
-      # explicit `--keep 0` can fall through to validation the way the help
-      # text already promised it would.
-      nil -> {:ok, Keyword.get(opts, :keep) || dice}
-      raw -> integer(raw, "keep")
-    end
-  end
-
-  defp integer(raw, name) do
-    case Integer.parse(raw) do
-      {value, ""} -> {:ok, value}
-      _ -> {:error, ~s(#{name} must be a number, got "#{raw}".)}
-    end
-  end
-
-  defp render(expr, iterations, opts) do
+  defp render(expr, repeat, opts) do
     notation = Expr.notation(expr)
 
     format =
@@ -152,7 +131,7 @@ defmodule DierollerCLI do
     expr
     |> Dice.stream()
     |> Stream.map(format)
-    |> Stream.take(iterations)
+    |> Stream.take(repeat)
   end
 
   # One parenthesised group per dice term, so a single-group expression reads

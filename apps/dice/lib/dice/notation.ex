@@ -5,6 +5,7 @@ defmodule Dice.Notation do
 
   The grammar is
 
+      roll       := (integer 'x')? expression
       expression := term (('+' | '-') term)* ('*' integer)?
       term       := dice | integer
       dice       := integer 'd' integer selector?
@@ -14,6 +15,11 @@ defmodule Dice.Notation do
   so `4d6k3`, `2d20kl1` (roll with disadvantage), `4d6dl1` (drop the lowest) and
   `2d6+1d8-1` are all accepted. Drop always needs its direction letter, because
   a bare `d` is already the dice separator.
+
+  A leading repeat count rolls the same expression several times, so `6x4d6k3`
+  rolls four dice keeping the best three, six times over. The count is not part
+  of the expression itself and does not appear in the rendered notation, since
+  that describes a single roll.
 
   Dropping is stored as keeping from the opposite end, so `4d6dl1` and `4d6k3`
   produce the same spec and both render as `4D6K3`.
@@ -25,43 +31,51 @@ defmodule Dice.Notation do
 
   @dice ~r/^(?<dice>\d+)[dD](?<sides>\d+)(?:(?<kop>[kK])(?<kdir>[hHlL]?)(?<kn>\d+)|(?<dop>[dD])(?<ddir>[hHlL])(?<dn>\d+))?$/
 
+  @repeat ~r/^(\d+)[xX](.+)$/
+
   @ops %{"+" => :+, "-" => :-, "*" => :*}
 
   @doc """
-  Returns true when the string looks like a dice expression.
+  Parses a whole roll: an optional `<n>x` repeat count, then an expression.
 
-  The CLI uses this to decide whether a leading positional argument is notation
-  or the legacy `<dice> <sides> <modifier> <keep>` form, so it deliberately
-  requires an actual dice group rather than a bare number.
+  Unlike `parse/1` this insists the expression contain at least one dice group,
+  so a bare constant is reported rather than silently rolling nothing.
 
-      iex> Dice.Notation.notation?("4d6k3")
-      true
+      iex> {:ok, {repeat, expr}} = Dice.Notation.parse_roll("6x4d6k3")
+      iex> {repeat, Dice.Expr.notation(expr)}
+      {6, "4D6K3"}
 
-      iex> Dice.Notation.notation?("2d6+1d8")
-      true
+      iex> {:ok, {repeat, expr}} = Dice.Notation.parse_roll("2d6+1d8-1")
+      iex> {repeat, Dice.Expr.notation(expr)}
+      {1, "2D6+1D8-1"}
 
-      iex> Dice.Notation.notation?("5")
-      false
+      iex> Dice.Notation.parse_roll("0x3d6")
+      {:error, "repeat count must be greater than 0."}
+
+      iex> Dice.Notation.parse_roll("7")
+      {:error, ~s(expression contains no dice: "7")}
   """
-  @spec notation?(String.t()) :: boolean()
-  def notation?(string), do: dice_like?(string) and match?({:ok, _}, parse(string))
+  @spec parse_roll(String.t()) :: {:ok, {pos_integer(), Expr.t()}} | {:error, String.t()}
+  def parse_roll(string) do
+    trimmed = String.trim(string)
 
-  @doc """
-  Returns true when the string is *shaped* like a dice expression, whether or not
-  it actually parses.
+    {repeat, rest} =
+      case Regex.run(@repeat, strip(trimmed), capture: :all_but_first) do
+        [count, rest] -> {String.to_integer(count), rest}
+        nil -> {1, trimmed}
+      end
 
-  The CLI dispatches on this rather than on `notation?/1` so that a malformed
-  expression reports why it is malformed, instead of falling through to the
-  legacy positional form and complaining that "2d6k5" is not a number.
-
-      iex> Dice.Notation.dice_like?("2d6k5")
-      true
-
-      iex> Dice.Notation.dice_like?("abc")
-      false
-  """
-  @spec dice_like?(String.t()) :: boolean()
-  def dice_like?(string), do: String.match?(strip(string), ~r/\d[dD]\d/)
+    if repeat < 1 do
+      {:error, "repeat count must be greater than 0."}
+    else
+      with {:ok, expr} <- parse(rest) do
+        case Expr.specs(expr) do
+          [] -> {:error, ~s(expression contains no dice: "#{trimmed}")}
+          _ -> {:ok, {repeat, expr}}
+        end
+      end
+    end
+  end
 
   @doc """
   Parses a dice expression.

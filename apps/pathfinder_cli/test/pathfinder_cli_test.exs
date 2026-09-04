@@ -105,6 +105,12 @@ defmodule PathfinderCLITest do
       assert object["method"] == "pool 3/3/3/3/3/9"
     end
 
+    test "version reports the application version" do
+      assert {:ok, out} = run("--version")
+      assert out =~ ~r/^pathfinder-character \d+\.\d+\.\d+\n$/
+      assert run("-V") == run("--version")
+    end
+
     test "help is output, not an error" do
       assert {:ok, help} = run("--help")
       assert help =~ "pathfinder-character"

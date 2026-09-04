@@ -12,74 +12,94 @@ defmodule DierollerCLITest do
     end
   end
 
-  describe "argument forms" do
-    test "a bare count rolls that many d20s" do
-      assert {:ok, out} = run("5 -v")
+  defp lines(argv), do: run(argv) |> elem(1) |> String.split("\n", trim: true)
+
+  describe "rolling" do
+    test "a single die" do
+      assert {:ok, out} = run("1d20 -v")
+      assert out =~ ~r/^1D20 \(\d+\) => \d+\n$/
+    end
+
+    test "several dice" do
+      assert {:ok, out} = run("5d20 -v")
       assert out =~ ~r/^5D20 \(\d+ \d+ \d+ \d+ \d+\) => \d+\n$/
     end
 
-    test "two positionals are dice and sides" do
-      assert {:ok, out} = run("1 10 -v")
-      assert out =~ ~r/^1D10 \(\d+\) => \d+\n$/
+    test "a modifier" do
+      assert run("3d1+3 -v") == {:ok, "3D1+3 (1 1 1) => 6\n"}
     end
 
-    test "three positionals add a modifier" do
-      assert {:ok, out} = run("3 6 +3 -v")
-      assert out =~ ~r/^3D6\+3 \(/
-    end
-
-    test "four positionals add a keep count" do
-      assert {:ok, out} = run("3 6 +6 2 -v")
-      assert out =~ ~r/^3D6K2\+6 \(\d+ \d+\) => \d+\n$/
-    end
-
-    test "long flags work" do
-      assert {:ok, out} = run("--dice 5 --sides 100 --modifier +4 --keep 3 -v")
-      assert out =~ ~r/^5D100K3\+4 \(/
-    end
-
-    test "dice notation is accepted" do
+    test "keeping the best of several" do
       assert {:ok, out} = run("4d6k3 -v")
       assert out =~ ~r/^4D6K3 \(\d+ \d+ \d+\) => \d+\n$/
     end
 
-    test "positionals and flags merge slot by slot, as the original did" do
-      assert {:ok, out} = run("3 --sides 6 -v")
-      assert out =~ ~r/^3D6 \(/
+    test "advantage and disadvantage" do
+      # kh is the default direction, so it renders as plain K.
+      assert {:ok, high} = run("2d20kh1 -v")
+      assert high =~ ~r/^2D20K1 \(\d+\) => \d+\n$/
+
+      assert {:ok, low} = run("2d20kl1 -v")
+      assert low =~ ~r/^2D20KL1 \(\d+\) => \d+\n$/
     end
 
-    test "an omitted --keep still defaults to the dice count" do
-      assert {:ok, out} = run("--dice 4 --sides 6 -v")
-      assert out =~ ~r/^4D6 \(/
+    test "dropping dice" do
+      assert {:ok, out} = run("4d6dl1 -v")
+      assert out =~ ~r/^4D6K3 \(/
+      assert {:ok, high} = run("4d6dh1 -v")
+      assert high =~ ~r/^4D6KL3 \(/
     end
 
-    test "a modifier without a sign is treated as addition" do
-      assert {:ok, out} = run("3 6 3 -v")
-      assert out =~ ~r/^3D6\+3 \(/
+    test "several dice groups and constants" do
+      assert run("2d1+1d1-1 -v") == {:ok, "2D1+1D1-1 (1 1) (1) => 2\n"}
+      assert run("2d1-1d1 -v") == {:ok, "2D1-1D1 (1 1) (1) => 1\n"}
+    end
+
+    test "a trailing multiplier scales the whole expression" do
+      assert run("2d1+3*2 -v") == {:ok, "2D1+3*2 (1 1) => 10\n"}
+    end
+
+    test "a quoted expression may contain spaces" do
+      assert {:ok, out} = DierollerCLI.run(["2d6 + 1d8", "-v"])
+      assert out |> Enum.join() =~ ~r/^2D6\+1D8 \(/
+    end
+  end
+
+  describe "repeat count" do
+    test "rolls the expression that many times" do
+      assert lines("6x1d1") == ~w(1 1 1 1 1 1)
+    end
+
+    test "is not part of the rendered notation" do
+      assert run("3x1d1 -v") == {:ok, "1D1 (1) => 1\n1D1 (1) => 1\n1D1 (1) => 1\n"}
+    end
+
+    test "defaults to one" do
+      assert lines("1d1") == ["1"]
+    end
+
+    test "is case insensitive" do
+      assert lines("2X1d1") == ~w(1 1)
+    end
+
+    test "must be greater than zero" do
+      assert run("0x3d6") == {:error, "repeat count must be greater than 0."}
     end
   end
 
   describe "output" do
     test "defaults to the total alone" do
-      assert {:ok, out} = run("3 1")
-      assert out == "3\n"
+      assert run("3d1") == {:ok, "3\n"}
     end
 
     test "verbose shows notation, kept dice, and total" do
-      assert run("3 1 +2 -v") == {:ok, "3D1+2 (1 1 1) => 5\n"}
+      assert run("3d1+2 -v") == {:ok, "3D1+2 (1 1 1) => 5\n"}
     end
 
-    test "iterations emit one line each" do
-      assert {:ok, out} = run("2 1 --iterations 3")
-      assert out == "2\n2\n2\n"
-    end
+    test "json emits one object per roll" do
+      assert {:ok, out} = run("2d1 --json")
 
-    test "json emits one object per line" do
-      assert {:ok, out} = run("2 1 --json --iterations 2")
-      [a, b] = String.split(out, "\n", trim: true)
-      assert JSON.decode!(a) == JSON.decode!(b)
-
-      assert JSON.decode!(a) == %{
+      assert JSON.decode!(out) == %{
                "notation" => "2D1",
                "groups" => [
                  %{"notation" => "2D1", "rolled" => [1, 1], "kept" => [1, 1], "sum" => 2}
@@ -89,122 +109,117 @@ defmodule DierollerCLITest do
              }
     end
 
-    test "help is returned as output, not an error" do
-      assert {:ok, help} = run("--help")
-      assert help =~ "dieroller [ <option> ... ]"
-      assert help =~ "--iterations"
-    end
-  end
-
-  describe "keep, drop and multiple groups" do
-    test "keep lowest rolls with disadvantage" do
-      assert {:ok, out} = run("2d20kl1 -v")
-      assert out =~ ~r/^2D20KL1 \(\d+\) => \d+\n$/
-    end
-
-    test "drop lowest is the same as keeping the highest of the rest" do
-      assert {:ok, out} = run("4d6dl1 -v")
-      assert out =~ ~r/^4D6K3 \(\d+ \d+ \d+\) => \d+\n$/
-    end
-
-    test "drop highest keeps the lowest of the rest" do
-      assert {:ok, out} = run("4d6dh1 -v")
-      assert out =~ ~r/^4D6KL3 \(/
-    end
-
-    test "several groups each get their own parentheses" do
-      assert {:ok, out} = run("2d6+1d8 -v")
-      assert out =~ ~r/^2D6\+1D8 \(\d+ \d+\) \(\d+\) => \d+\n$/
-    end
-
-    test "groups and constants combine" do
-      assert {:ok, out} = run("2d1+1d1-1 -v")
-      assert out == "2D1+1D1-1 (1 1) (1) => 2\n"
-    end
-
-    test "a group can be subtracted" do
-      assert {:ok, out} = run("2d1-1d1 -v")
-      assert out == "2D1-1D1 (1 1) (1) => 1\n"
-    end
-
-    test "a trailing multiplier scales the whole expression" do
-      assert run("2d1+3*2 -v") == {:ok, "2D1+3*2 (1 1) => 10\n"}
-    end
-
     test "json reports each group separately" do
       assert {:ok, out} = run("2d1+1d1 --json")
       decoded = JSON.decode!(out)
-      assert decoded["notation"] == "2D1+1D1"
       assert length(decoded["groups"]) == 2
       assert decoded["total"] == 3
     end
 
-    test "keep lowest really selects the low die" do
-      # 2d20kl1 must never exceed 2d20kh1 on average; over many rolls the gap is
-      # large enough to assert without flakiness.
-      low = mean("2d20kl1 -i 2000")
-      high = mean("2d20kh1 -i 2000")
-      assert low < high
-      assert_in_delta low, 7.175, 1.0
-      assert_in_delta high, 13.825, 1.0
-    end
-
-    test "drop lowest matches keep highest statistically" do
-      assert_in_delta mean("4d6dl1 -i 3000"), mean("4d6k3 -i 3000"), 0.4
-    end
-
-    defp mean(argv) do
-      {:ok, out} = run(argv)
-      values = out |> String.split("\n", trim: true) |> Enum.map(&String.to_integer/1)
-      Enum.sum(values) / length(values)
+    test "json with a repeat count emits one object per line" do
+      objects = "3x2d1 --json" |> lines() |> Enum.map(&JSON.decode!/1)
+      assert length(objects) == 3
     end
   end
 
-  describe "streaming" do
-    test "output is lazy, so a huge --iterations costs nothing until drained" do
-      assert {:ok, output} = DierollerCLI.run(~w(1d6 -i 100000000))
-      # Taking three from a hundred million must not evaluate the rest.
-      assert output |> Enum.take(3) |> length() == 3
+  describe "informational flags" do
+    test "help describes the notation" do
+      assert {:ok, help} = run("--help")
+      assert help =~ "dieroller [ <option> ... ] <roll>"
+      assert help =~ "kl<n>"
+      assert help =~ "6x4d6k3"
     end
 
-    test "help is still returned as drainable output" do
-      assert {:ok, output} = DierollerCLI.run(["--help"])
-      assert output |> Enum.join() =~ "dieroller [ <option> ... ]"
+    test "help is available as -h" do
+      assert run("-h") == run("--help")
+    end
+
+    test "version reports the application version" do
+      assert {:ok, out} = run("--version")
+      assert out =~ ~r/^dieroller \d+\.\d+\.\d+\n$/
+    end
+
+    test "version is available as -V" do
+      assert run("-V") == run("--version")
+    end
+
+    test "help wins over a roll" do
+      assert {:ok, out} = run("4d6k3 --help")
+      assert out =~ "dieroller [ <option> ... ]"
     end
   end
 
   describe "seeding" do
     test "the same seed gives byte-identical output" do
-      assert run("10 100 --seed 42 -i 5 -v") == run("10 100 --seed 42 -i 5 -v")
+      assert run("10x10d100 --seed 42 -v") == run("10x10d100 --seed 42 -v")
     end
 
     test "different seeds diverge" do
-      refute run("20 1000 --seed 1 -v") == run("20 1000 --seed 2 -v")
+      refute run("20d1000 --seed 1") == run("20d1000 --seed 2")
+    end
+  end
+
+  describe "streaming" do
+    test "output is lazy, so a huge repeat count costs nothing until drained" do
+      assert {:ok, output} = DierollerCLI.run(["100000000x1d6"])
+      assert output |> Enum.take(3) |> length() == 3
     end
   end
 
   describe "errors" do
-    test "reports the original validation messages" do
-      assert run("0") == {:error, "dice must be greater than 0."}
-      assert run("3 6 +6 7") == {:error, "dice must be greater than or equal to keep."}
-      assert run("3 0") == {:error, "sides must be greater than 0."}
-      assert run("--dice 3 --keep 0 --sides 6") == {:error, "keep must be greater than 0."}
-      assert run("3 6 +0 0") == {:error, "keep must be greater than 0."}
-      assert run("-i 0") == {:error, "iterations must be greater than 0."}
+    test "requires an expression" do
+      assert run("-v") == {:error, "no dice expression given."}
+    end
+
+    test "rejects an expression with no dice" do
+      assert {:error, message} = run("2+3")
+      assert message =~ "expression contains no dice"
+    end
+
+    test "propagates notation errors" do
+      assert run("2d6k5") == {:error, "dice must be greater than or equal to keep."}
+      assert run("2d0") == {:error, "sides must be greater than 0."}
+      assert run("0d6") == {:error, "dice must be greater than 0."}
+      assert run("4d6dl4") == {:error, "keep must be greater than 0."}
+      assert {:error, message} = run("4d6d1")
+      assert message =~ "could not parse dice notation"
     end
 
     test "rejects unknown options" do
       assert run("--bogus") == {:error, "unrecognized option --bogus."}
     end
 
-    test "rejects trailing junk after notation" do
-      assert {:error, message} = run("4d6k3 extra")
-      assert message =~ "unexpected arguments after dice notation"
+    # The flags and positional arguments the notation replaced.
+    test "the removed dice flags are no longer accepted" do
+      for flag <- ~w(--dice --sides --keep --modifier --iterations) do
+        assert {:error, message} = run("#{flag} 3")
+        assert message =~ "unrecognized option #{flag}"
+      end
     end
 
-    test "rejects non-numeric positionals" do
-      assert {:error, message} = run("abc")
-      assert message =~ "dice must be a number"
+    test "the old positional form suggests its notation equivalent" do
+      assert {:error, message} = run("5")
+      assert message =~ "try: dieroller 5d20"
+
+      assert {:error, message} = run("3 6")
+      assert message =~ "try: dieroller 3d6"
+
+      assert {:error, message} = run("3 6 +3")
+      assert message =~ "try: dieroller 3d6+3"
+
+      assert {:error, message} = run("3 6 +6 2")
+      assert message =~ "try: dieroller 3d6k2+6"
+    end
+
+    test "an unquoted spaced expression suggests quoting" do
+      assert {:error, message} = run("2d6 + 1d8")
+      assert message =~ "quote the whole expression"
+      assert message =~ ~s(dieroller "2d6 + 1d8")
+    end
+
+    test "trailing junk after a valid expression suggests quoting" do
+      assert {:error, message} = run("4d6k3 extra")
+      assert message =~ "one argument"
     end
   end
 end

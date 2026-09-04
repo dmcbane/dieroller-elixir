@@ -28,6 +28,7 @@ defmodule PathfinderCLI.Help do
       (default to 1)
     -j, --json : Emit one JSON object per character instead of text.
     --seed <seed> : Seed the random number generator for reproducible characters.
+    -V, --version : Show the version
     --help, -h : Show this help
   """
 

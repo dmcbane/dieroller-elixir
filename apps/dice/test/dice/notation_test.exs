@@ -133,24 +133,6 @@ defmodule Dice.NotationTest do
     end
   end
 
-  describe "notation?/1" do
-    test "recognises dice expressions" do
-      assert Notation.notation?("4d6k3")
-      assert Notation.notation?("2d6+1d8")
-      assert Notation.notation?("2d20kl1")
-    end
-
-    test "rejects bare numbers, so the legacy positional form still works" do
-      refute Notation.notation?("5")
-      refute Notation.notation?("3")
-    end
-
-    test "rejects nonsense" do
-      refute Notation.notation?("abc")
-      refute Notation.notation?("4d6k")
-    end
-  end
-
   describe "round trip" do
     property "rendering a parsed expression reproduces its canonical form" do
       check all(

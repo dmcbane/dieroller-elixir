@@ -10,6 +10,8 @@ defmodule PathfinderCLI do
   alias Dice.Pathfinder.{Character, Purchase}
   alias PathfinderCLI.Help
 
+  @version Mix.Project.config()[:version]
+
   @hint "Try 'pathfinder-character --help' for more information."
   @methods [:classic, :standard, :heroic, :pool, :purchase]
 
@@ -23,7 +25,8 @@ defmodule PathfinderCLI do
     number: :integer,
     json: :boolean,
     seed: :integer,
-    help: :boolean
+    help: :boolean,
+    version: :boolean
   ]
 
   @aliases [
@@ -35,20 +38,29 @@ defmodule PathfinderCLI do
     v: :verbose,
     n: :number,
     j: :json,
-    h: :help
+    h: :help,
+    V: :version
   ]
 
   @doc false
   def main(argv) do
     case run(argv) do
       {:ok, output} ->
-        Enum.each(output, &IO.write/1)
+        write(output)
 
       {:error, message} ->
         IO.puts(:stderr, message)
         IO.puts(:stderr, @hint)
         System.halt(1)
     end
+  end
+
+  # Writing to a closed pipe is how `pathfinder-character ... | head` ends, and the shell
+  # convention is to stop quietly rather than report it as a failure.
+  defp write(output) do
+    Enum.each(output, &IO.write/1)
+  rescue
+    ErlangError -> :ok
   end
 
   @doc """
@@ -66,16 +78,21 @@ defmodule PathfinderCLI do
   end
 
   defp dispatch(opts) do
-    if opts[:help] do
-      {:ok, [Help.text()]}
-    else
-      with {:ok, method} <- method(opts) do
-        if seed = opts[:seed], do: Dice.seed(seed)
+    cond do
+      opts[:help] ->
+        {:ok, [Help.text()]}
 
-        with {:ok, characters} <- Pathfinder.characters(method, Keyword.get(opts, :number, 1)) do
-          {:ok, render(characters, method, opts)}
+      opts[:version] ->
+        {:ok, ["pathfinder-character #{@version}\n"]}
+
+      true ->
+        with {:ok, method} <- method(opts) do
+          if seed = opts[:seed], do: Dice.seed(seed)
+
+          with {:ok, characters} <- Pathfinder.characters(method, Keyword.get(opts, :number, 1)) do
+            {:ok, render(characters, method, opts)}
+          end
         end
-      end
     end
   end
 
