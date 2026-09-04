@@ -7,7 +7,7 @@ defmodule Dice do
   RNG, which `seed/1` makes reproducible.
   """
 
-  alias Dice.{Roll, Spec}
+  alias Dice.{Expr, Outcome, Roll, Spec}
 
   @doc """
   Rolls a spec once.
@@ -21,7 +21,7 @@ defmodule Dice do
   @spec roll(Spec.t()) :: Roll.t()
   def roll(%Spec{} = spec) do
     rolled = Enum.map(1..spec.dice//1, fn _ -> :rand.uniform(spec.sides) end)
-    kept = rolled |> Enum.sort(:desc) |> Enum.take(spec.keep)
+    kept = Spec.select(spec, rolled)
     subtotal = Enum.sum(kept)
 
     %Roll{
@@ -34,11 +34,44 @@ defmodule Dice do
   end
 
   @doc """
-  An infinite lazy stream of rolls of the same spec.
+  Rolls a whole expression, one group per dice term.
+
+      iex> Dice.seed(1)
+      iex> {:ok, expr} = Dice.Notation.parse("2d6+1d8-1")
+      iex> outcome = Dice.roll_expr(expr)
+      iex> length(outcome.groups)
+      2
+  """
+  @spec roll_expr(Expr.t()) :: Outcome.t()
+  def roll_expr(%Expr{terms: terms, scale: scale} = expr) do
+    {groups, subtotal} =
+      Enum.reduce(terms, {[], 0}, fn
+        {sign, %Spec{} = spec}, {groups, sum} ->
+          rolled = roll(spec)
+          {[rolled | groups], combine(sign, sum, rolled.total)}
+
+        {sign, constant}, {groups, sum} when is_integer(constant) ->
+          {groups, combine(sign, sum, constant)}
+      end)
+
+    %Outcome{
+      expr: expr,
+      groups: Enum.reverse(groups),
+      subtotal: subtotal,
+      total: if(scale, do: subtotal * scale, else: subtotal)
+    }
+  end
+
+  defp combine(:+, sum, value), do: sum + value
+  defp combine(:-, sum, value), do: sum - value
+
+  @doc """
+  An infinite lazy stream of rolls of the same expression.
 
   The CLI's `--iterations` is `Enum.take/2` over this.
   """
-  @spec stream(Spec.t()) :: Enumerable.t()
+  @spec stream(Expr.t() | Spec.t()) :: Enumerable.t()
+  def stream(%Expr{} = expr), do: Stream.repeatedly(fn -> roll_expr(expr) end)
   def stream(%Spec{} = spec), do: Stream.repeatedly(fn -> roll(spec) end)
 
   @doc """

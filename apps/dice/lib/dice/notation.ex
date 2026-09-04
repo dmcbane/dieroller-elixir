@@ -1,67 +1,173 @@
 defmodule Dice.Notation do
   @moduledoc """
-  Parsing of dice notation (`4d6k3+2`) and of the bare modifier argument the
-  original command line accepted (`+3`, `-1`, `*2`, or a lone `3`).
+  Parsing of dice notation and of the bare modifier argument the original
+  command line accepted (`+3`, `-1`, `*2`, or a lone `3`).
+
+  The grammar is
+
+      expression := term (('+' | '-') term)* ('*' integer)?
+      term       := dice | integer
+      dice       := integer 'd' integer selector?
+      selector   := 'k' ('h' | 'l')? integer     -- keep, defaulting to highest
+                  | 'd' ('h' | 'l')  integer     -- drop
+
+  so `4d6k3`, `2d20kl1` (roll with disadvantage), `4d6dl1` (drop the lowest) and
+  `2d6+1d8-1` are all accepted. Drop always needs its direction letter, because
+  a bare `d` is already the dice separator.
+
+  Dropping is stored as keeping from the opposite end, so `4d6dl1` and `4d6k3`
+  produce the same spec and both render as `4D6K3`.
   """
 
-  alias Dice.Spec
+  alias Dice.{Expr, Spec}
 
-  @notation ~r/^(\d+)[dD](\d+)(?:[kK](\d+))?(?:\s*([-+*])\s*(\d+))?$/
+  @token ~r/^([-+*])?(\d+[dD]\d+(?:[kK][hHlL]?\d+|[dD][hHlL]\d+)?|\d+)/
+
+  @dice ~r/^(?<dice>\d+)[dD](?<sides>\d+)(?:(?<kop>[kK])(?<kdir>[hHlL]?)(?<kn>\d+)|(?<dop>[dD])(?<ddir>[hHlL])(?<dn>\d+))?$/
+
   @ops %{"+" => :+, "-" => :-, "*" => :*}
 
   @doc """
-  Returns true when the string looks like dice notation.
+  Returns true when the string looks like a dice expression.
 
   The CLI uses this to decide whether a leading positional argument is notation
-  or the legacy `<dice> <sides> <modifier> <keep>` form.
+  or the legacy `<dice> <sides> <modifier> <keep>` form, so it deliberately
+  requires an actual dice group rather than a bare number.
 
       iex> Dice.Notation.notation?("4d6k3")
+      true
+
+      iex> Dice.Notation.notation?("2d6+1d8")
       true
 
       iex> Dice.Notation.notation?("5")
       false
   """
   @spec notation?(String.t()) :: boolean()
-  def notation?(string), do: Regex.match?(@notation, String.trim(string))
+  def notation?(string), do: dice_like?(string) and match?({:ok, _}, parse(string))
 
   @doc """
-  Parses dice notation into a validated `Dice.Spec`.
+  Returns true when the string is *shaped* like a dice expression, whether or not
+  it actually parses.
 
-      iex> Dice.Notation.parse("4d6k3+2")
-      {:ok, %Dice.Spec{dice: 4, sides: 6, keep: 3, op: :+, amount: 2}}
+  The CLI dispatches on this rather than on `notation?/1` so that a malformed
+  expression reports why it is malformed, instead of falling through to the
+  legacy positional form and complaining that "2d6k5" is not a number.
 
-      iex> Dice.Notation.parse("2D10")
-      {:ok, %Dice.Spec{dice: 2, sides: 10, keep: 2, op: :+, amount: 0}}
+      iex> Dice.Notation.dice_like?("2d6k5")
+      true
 
-      iex> Dice.Notation.parse("d20")
-      {:error, ~s(could not parse dice notation: "d20")}
+      iex> Dice.Notation.dice_like?("abc")
+      false
   """
-  @spec parse(String.t()) :: {:ok, Spec.t()} | {:error, String.t()}
-  def parse(string) do
-    trimmed = String.trim(string)
+  @spec dice_like?(String.t()) :: boolean()
+  def dice_like?(string), do: String.match?(strip(string), ~r/\d[dD]\d/)
 
-    case Regex.run(@notation, trimmed, capture: :all_but_first) do
-      nil -> {:error, ~s(could not parse dice notation: "#{trimmed}")}
-      captures -> build(captures)
+  @doc """
+  Parses a dice expression.
+
+      iex> {:ok, expr} = Dice.Notation.parse("4d6k3+2")
+      iex> Dice.Expr.notation(expr)
+      "4D6K3+2"
+
+      iex> {:ok, expr} = Dice.Notation.parse("2d20kl1")
+      iex> Dice.Expr.notation(expr)
+      "2D20KL1"
+
+      iex> {:ok, expr} = Dice.Notation.parse("4d6dl1")
+      iex> Dice.Expr.notation(expr)
+      "4D6K3"
+
+      iex> {:ok, expr} = Dice.Notation.parse("2d6+1d8-1")
+      iex> Dice.Expr.notation(expr)
+      "2D6+1D8-1"
+  """
+  @spec parse(String.t()) :: {:ok, Expr.t()} | {:error, String.t()}
+  def parse(string) do
+    stripped = strip(string)
+
+    with {:ok, tokens} <- scan(stripped, string, []) do
+      build(tokens, string)
     end
   end
 
-  # Regex.run drops trailing groups that did not participate, so pad back to
-  # the full arity before destructuring.
-  defp build(captures) do
-    [dice, sides, keep, op, amount] = captures ++ List.duplicate("", 5 - length(captures))
+  defp strip(string), do: String.replace(string, ~r/\s+/, "")
 
-    Spec.new(
-      dice: String.to_integer(dice),
-      sides: String.to_integer(sides),
-      keep: optional_integer(keep),
-      op: Map.get(@ops, op, :+),
-      amount: optional_integer(amount) || 0
-    )
+  defp scan("", _original, []), do: {:error, "no dice expression given."}
+  defp scan("", _original, acc), do: {:ok, Enum.reverse(acc)}
+
+  defp scan(rest, original, acc) do
+    case Regex.run(@token, rest) do
+      nil ->
+        {:error, ~s(could not parse dice notation: "#{String.trim(original)}")}
+
+      [matched, sign, body] ->
+        remaining = binary_part(rest, byte_size(matched), byte_size(rest) - byte_size(matched))
+        scan(remaining, original, [{sign, body} | acc])
+    end
   end
 
-  defp optional_integer(""), do: nil
-  defp optional_integer(digits), do: String.to_integer(digits)
+  defp build(tokens, original) do
+    with {:ok, terms, scale} <- collect(tokens, original, [], nil) do
+      {:ok, %Expr{terms: Enum.reverse(terms), scale: scale}}
+    end
+  end
+
+  # A scale must be the final token, so anything following one is an error.
+  defp collect([], _original, terms, scale), do: {:ok, terms, scale}
+
+  defp collect(_tokens, original, _terms, scale) when not is_nil(scale) do
+    {:error, ~s(a * multiplier must come last: "#{String.trim(original)}")}
+  end
+
+  defp collect([{"*", body} | rest], original, terms, _scale) do
+    case Integer.parse(body) do
+      {amount, ""} -> collect(rest, original, terms, amount)
+      _ -> {:error, ~s(a * multiplier must be a whole number: "#{String.trim(original)}")}
+    end
+  end
+
+  defp collect([{sign, body} | rest], original, terms, scale) do
+    with {:ok, value} <- term(body) do
+      collect(rest, original, [{Map.get(@ops, sign, :+), value} | terms], scale)
+    end
+  end
+
+  defp term(body) do
+    case Regex.named_captures(@dice, body) do
+      nil -> {:ok, String.to_integer(body)}
+      captures -> dice_spec(captures)
+    end
+  end
+
+  defp dice_spec(%{"dice" => dice, "sides" => sides} = captures) do
+    dice = String.to_integer(dice)
+    {keep, from} = selection(dice, captures)
+
+    Spec.new(dice: dice, sides: String.to_integer(sides), keep: keep, from: from)
+  end
+
+  # No selector: every die counts.
+  defp selection(dice, %{"kn" => "", "dn" => ""}), do: {dice, :high}
+
+  # Keep, defaulting to the high end when no direction is given.
+  defp selection(_dice, %{"kn" => count, "kdir" => direction}) when count != "" do
+    {String.to_integer(count), direction(direction, :high)}
+  end
+
+  # Drop is keeping from the opposite end: drop the lowest 1 of 4d6 is keep the
+  # highest 3, drop the highest 1 is keep the lowest 3.
+  defp selection(dice, %{"dn" => count, "ddir" => direction}) do
+    dropped = String.to_integer(count)
+    {dice - dropped, direction(direction, :low) |> opposite()}
+  end
+
+  defp direction(letter, _default) when letter in ["l", "L"], do: :low
+  defp direction(letter, _default) when letter in ["h", "H"], do: :high
+  defp direction(_letter, default), do: default
+
+  defp opposite(:low), do: :high
+  defp opposite(:high), do: :low
 
   @doc """
   Parses a standalone modifier argument.

@@ -73,7 +73,10 @@ defmodule Dice.Pathfinder.Purchase do
   Exact equality matches the original: a 15-point character spends all 15.
   """
   @spec spreads_for(integer()) :: [[pos_integer()]]
-  def spreads_for(points), do: Map.get(@by_cost, points, [])
+  # Goes through by_cost/0 rather than reading @by_cost again: a module
+  # attribute is pasted in at each use site, and a second copy of this table
+  # costs about 29 KB of BEAM for no benefit.
+  def spreads_for(points), do: Map.get(by_cost(), points, [])
 
   @doc "Picks a random spread costing exactly `points`, sorted descending."
   @spec generate(integer()) :: {:ok, [pos_integer()]} | {:error, String.t()}

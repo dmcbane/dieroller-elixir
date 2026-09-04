@@ -2,12 +2,13 @@ defmodule DierollerCLI do
   @moduledoc """
   Command line entry point for `dieroller`.
 
-  `run/1` is pure apart from the RNG: it turns an argument list into either
-  output text or an error message. `main/1` is the only part that touches IO
-  and process exit status, which keeps the whole CLI testable in-process.
+  `run/1` is pure apart from the RNG: it turns an argument list into either a
+  lazy stream of output chunks or an error message. `main/1` is the only part
+  that touches IO and process exit status, which keeps the whole CLI testable
+  in-process while letting `--iterations` stream rather than buffer.
   """
 
-  alias Dice.{Notation, Spec}
+  alias Dice.{Expr, Notation, Spec}
   alias DierollerCLI.Help
 
   @hint "Try 'dieroller --help' for more information."
@@ -39,7 +40,7 @@ defmodule DierollerCLI do
   def main(argv) do
     case run(argv) do
       {:ok, output} ->
-        IO.write(output)
+        Enum.each(output, &IO.write/1)
 
       {:error, message} ->
         IO.puts(:stderr, message)
@@ -50,8 +51,11 @@ defmodule DierollerCLI do
 
   @doc """
   Turns an argument list into `{:ok, output}` or `{:error, message}`.
+
+  `output` is a lazy enumerable of chunks, so a large `--iterations` streams to
+  the terminal instead of being built in memory first.
   """
-  @spec run([String.t()]) :: {:ok, String.t()} | {:error, String.t()}
+  @spec run([String.t()]) :: {:ok, Enumerable.t()} | {:error, String.t()}
   def run(argv) do
     case OptionParser.parse(argv, strict: @switches, aliases: @aliases) do
       {opts, args, []} -> dispatch(opts, args)
@@ -61,12 +65,12 @@ defmodule DierollerCLI do
 
   defp dispatch(opts, args) do
     if opts[:help] do
-      {:ok, Help.text()}
+      {:ok, [Help.text()]}
     else
       with {:ok, iterations} <- iterations(opts),
-           {:ok, spec} <- build_spec(opts, args) do
+           {:ok, expr} <- build_expr(opts, args) do
         if seed = opts[:seed], do: Dice.seed(seed)
-        {:ok, render(spec, iterations, opts)}
+        {:ok, render(expr, iterations, opts)}
       end
     end
   end
@@ -79,18 +83,20 @@ defmodule DierollerCLI do
   end
 
   # A leading positional in dice notation short-circuits the legacy form.
-  defp build_spec(opts, [first | rest] = args) do
-    if Notation.notation?(first) do
+  defp build_expr(opts, [first | rest] = args) do
+    if Notation.dice_like?(first) do
       case rest do
         [] -> Notation.parse(first)
         extra -> {:error, "unexpected arguments after dice notation: #{Enum.join(extra, " ")}"}
       end
     else
-      legacy_spec(opts, args)
+      with {:ok, spec} <- legacy_spec(opts, args), do: {:ok, Expr.from_spec(spec)}
     end
   end
 
-  defp build_spec(opts, []), do: legacy_spec(opts, [])
+  defp build_expr(opts, []) do
+    with {:ok, spec} <- legacy_spec(opts, []), do: {:ok, Expr.from_spec(spec)}
+  end
 
   # The original merged flags and positionals slot by slot, with positionals
   # winning. Reproduced here so existing invocations behave identically.
@@ -133,30 +139,43 @@ defmodule DierollerCLI do
     end
   end
 
-  defp render(spec, iterations, opts) do
-    format = if opts[:json], do: &json_line/1, else: formatter(opts[:verbose], spec)
+  defp render(expr, iterations, opts) do
+    notation = Expr.notation(expr)
 
-    spec
+    format =
+      cond do
+        opts[:json] -> &json_line(&1, notation)
+        opts[:verbose] -> &verbose_line(&1, notation)
+        true -> &"#{&1.total}\n"
+      end
+
+    expr
     |> Dice.stream()
     |> Stream.map(format)
-    |> Enum.take(iterations)
-    |> Enum.join()
+    |> Stream.take(iterations)
   end
 
-  defp formatter(true, spec) do
-    notation = Spec.notation(spec)
-    fn roll -> "#{notation} (#{Enum.join(roll.kept, " ")}) => #{roll.total}\n" end
+  # One parenthesised group per dice term, so a single-group expression reads
+  # exactly as it always has: "4D6K3 (5 4 4) => 13".
+  defp verbose_line(outcome, notation) do
+    groups = Enum.map_join(outcome.groups, " ", &"(#{Enum.join(&1.kept, " ")})")
+    "#{notation} #{groups} => #{outcome.total}\n"
   end
 
-  defp formatter(_quiet, _spec), do: fn roll -> "#{roll.total}\n" end
-
-  defp json_line(roll) do
+  defp json_line(outcome, notation) do
     JSON.encode!(%{
-      notation: Spec.notation(roll.spec),
-      rolled: roll.rolled,
-      kept: roll.kept,
-      subtotal: roll.subtotal,
-      total: roll.total
+      notation: notation,
+      groups:
+        Enum.map(outcome.groups, fn group ->
+          %{
+            notation: Spec.notation(group.spec),
+            rolled: group.rolled,
+            kept: group.kept,
+            sum: group.total
+          }
+        end),
+      subtotal: outcome.subtotal,
+      total: outcome.total
     }) <> "\n"
   end
 end

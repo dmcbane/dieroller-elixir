@@ -42,7 +42,7 @@ defmodule PathfinderCLI do
   def main(argv) do
     case run(argv) do
       {:ok, output} ->
-        IO.write(output)
+        Enum.each(output, &IO.write/1)
 
       {:error, message} ->
         IO.puts(:stderr, message)
@@ -53,8 +53,10 @@ defmodule PathfinderCLI do
 
   @doc """
   Turns an argument list into `{:ok, output}` or `{:error, message}`.
+
+  `output` is an enumerable of chunks rather than one large binary.
   """
-  @spec run([String.t()]) :: {:ok, String.t()} | {:error, String.t()}
+  @spec run([String.t()]) :: {:ok, Enumerable.t()} | {:error, String.t()}
   def run(argv) do
     case OptionParser.parse(argv, strict: @switches, aliases: @aliases) do
       {opts, [], []} -> dispatch(opts)
@@ -65,7 +67,7 @@ defmodule PathfinderCLI do
 
   defp dispatch(opts) do
     if opts[:help] do
-      {:ok, Help.text()}
+      {:ok, [Help.text()]}
     else
       with {:ok, method} <- method(opts) do
         if seed = opts[:seed], do: Dice.seed(seed)
@@ -113,7 +115,7 @@ defmodule PathfinderCLI do
         true -> &plain_line/1
       end
 
-    Enum.map_join(characters, &format.(&1))
+    Stream.map(characters, format)
   end
 
   defp plain_line(%Character{abilities: abilities}), do: "#{Enum.join(abilities, " ")}\n"

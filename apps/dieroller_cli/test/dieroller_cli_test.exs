@@ -3,7 +3,14 @@ defmodule DierollerCLITest do
   # its own process.
   use ExUnit.Case, async: true
 
-  defp run(argv), do: DierollerCLI.run(String.split(argv))
+  # Drains the lazy stream run/1 returns, so the tests exercise exactly the path
+  # main/1 takes rather than a separate string-building one.
+  defp run(argv) do
+    case DierollerCLI.run(String.split(argv)) do
+      {:ok, output} -> {:ok, output |> Enum.to_list() |> IO.iodata_to_binary()}
+      error -> error
+    end
+  end
 
   describe "argument forms" do
     test "a bare count rolls that many d20s" do
@@ -74,8 +81,9 @@ defmodule DierollerCLITest do
 
       assert JSON.decode!(a) == %{
                "notation" => "2D1",
-               "rolled" => [1, 1],
-               "kept" => [1, 1],
+               "groups" => [
+                 %{"notation" => "2D1", "rolled" => [1, 1], "kept" => [1, 1], "sum" => 2}
+               ],
                "subtotal" => 2,
                "total" => 2
              }
@@ -85,6 +93,83 @@ defmodule DierollerCLITest do
       assert {:ok, help} = run("--help")
       assert help =~ "dieroller [ <option> ... ]"
       assert help =~ "--iterations"
+    end
+  end
+
+  describe "keep, drop and multiple groups" do
+    test "keep lowest rolls with disadvantage" do
+      assert {:ok, out} = run("2d20kl1 -v")
+      assert out =~ ~r/^2D20KL1 \(\d+\) => \d+\n$/
+    end
+
+    test "drop lowest is the same as keeping the highest of the rest" do
+      assert {:ok, out} = run("4d6dl1 -v")
+      assert out =~ ~r/^4D6K3 \(\d+ \d+ \d+\) => \d+\n$/
+    end
+
+    test "drop highest keeps the lowest of the rest" do
+      assert {:ok, out} = run("4d6dh1 -v")
+      assert out =~ ~r/^4D6KL3 \(/
+    end
+
+    test "several groups each get their own parentheses" do
+      assert {:ok, out} = run("2d6+1d8 -v")
+      assert out =~ ~r/^2D6\+1D8 \(\d+ \d+\) \(\d+\) => \d+\n$/
+    end
+
+    test "groups and constants combine" do
+      assert {:ok, out} = run("2d1+1d1-1 -v")
+      assert out == "2D1+1D1-1 (1 1) (1) => 2\n"
+    end
+
+    test "a group can be subtracted" do
+      assert {:ok, out} = run("2d1-1d1 -v")
+      assert out == "2D1-1D1 (1 1) (1) => 1\n"
+    end
+
+    test "a trailing multiplier scales the whole expression" do
+      assert run("2d1+3*2 -v") == {:ok, "2D1+3*2 (1 1) => 10\n"}
+    end
+
+    test "json reports each group separately" do
+      assert {:ok, out} = run("2d1+1d1 --json")
+      decoded = JSON.decode!(out)
+      assert decoded["notation"] == "2D1+1D1"
+      assert length(decoded["groups"]) == 2
+      assert decoded["total"] == 3
+    end
+
+    test "keep lowest really selects the low die" do
+      # 2d20kl1 must never exceed 2d20kh1 on average; over many rolls the gap is
+      # large enough to assert without flakiness.
+      low = mean("2d20kl1 -i 2000")
+      high = mean("2d20kh1 -i 2000")
+      assert low < high
+      assert_in_delta low, 7.175, 1.0
+      assert_in_delta high, 13.825, 1.0
+    end
+
+    test "drop lowest matches keep highest statistically" do
+      assert_in_delta mean("4d6dl1 -i 3000"), mean("4d6k3 -i 3000"), 0.4
+    end
+
+    defp mean(argv) do
+      {:ok, out} = run(argv)
+      values = out |> String.split("\n", trim: true) |> Enum.map(&String.to_integer/1)
+      Enum.sum(values) / length(values)
+    end
+  end
+
+  describe "streaming" do
+    test "output is lazy, so a huge --iterations costs nothing until drained" do
+      assert {:ok, output} = DierollerCLI.run(~w(1d6 -i 100000000))
+      # Taking three from a hundred million must not evaluate the rest.
+      assert output |> Enum.take(3) |> length() == 3
+    end
+
+    test "help is still returned as drainable output" do
+      assert {:ok, output} = DierollerCLI.run(["--help"])
+      assert output |> Enum.join() =~ "dieroller [ <option> ... ]"
     end
   end
 

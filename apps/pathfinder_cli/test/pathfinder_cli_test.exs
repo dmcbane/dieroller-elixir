@@ -1,7 +1,13 @@
 defmodule PathfinderCLITest do
   use ExUnit.Case, async: true
 
-  defp run(argv), do: PathfinderCLI.run(String.split(argv))
+  defp run(argv) do
+    case PathfinderCLI.run(String.split(argv)) do
+      {:ok, output} -> {:ok, output |> Enum.to_list() |> IO.iodata_to_binary()}
+      error -> error
+    end
+  end
+
   defp lines(argv), do: run(argv) |> elem(1) |> String.split("\n", trim: true)
 
   describe "generation methods" do

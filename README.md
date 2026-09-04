@@ -1,5 +1,7 @@
 # dieroller-elixir
 
+[![CI](https://github.com/dmcbane/dieroller-elixir/actions/workflows/ci.yml/badge.svg)](https://github.com/dmcbane/dieroller-elixir/actions/workflows/ci.yml)
+
 An Elixir port of [dieroller](https://github.com/dmcbane/dieroller): a command line die roller
 and a Pathfinder character generator for tabletop RPG players.
 
@@ -59,8 +61,27 @@ dieroller [ <option> ... ] [<arguments>] ...
 A single argument in standard dice notation replaces the positional form:
 
 ```
-<dice>d<sides>[k<keep>][<modifier>]
+expression := term (('+' | '-') term)* ('*' integer)?
+term       := dice | integer
+dice       := integer 'd' integer selector?
+selector   := 'k' ('h' | 'l')? integer     -- keep, defaulting to highest
+            | 'd' ('h' | 'l')  integer     -- drop
 ```
+
+| notation | meaning |
+|---|---|
+| `3d6` | roll three six-sided dice |
+| `4d6k3`, `4d6kh3` | keep the highest three |
+| `2d20kl1` | keep the lowest -- rolling with disadvantage |
+| `2d20kh1` | keep the highest -- rolling with advantage |
+| `4d6dl1` | drop the lowest (the same roll as `4d6k3`) |
+| `4d6dh1` | drop the highest |
+| `2d6+1d8-1` | several groups and constants |
+| `3d6*2` | double the total of the kept dice |
+
+Drop always needs its direction letter, since a bare `d` already separates dice
+from sides. Dropping is stored as keeping from the other end, so `4d6dl1` and
+`4d6k3` are the same spec and both display as `4D6K3`.
 
 ```console
 $ dieroller 4d6k3 --iterations 6 --verbose
@@ -83,9 +104,18 @@ $ dieroller 1 10                                     # 1d10
 $ dieroller 3 6 +3                                   # 3d6, +3 to the total
 $ dieroller 3 6 +6 2                                 # 3d6, keep the best 2, +6
 $ dieroller --dice 4 --sides 6 --keep 3              # same as 4d6k3
+$ dieroller 2d20kl1                                  # disadvantage
+$ dieroller 4d6dl1                                   # drop the lowest
+$ dieroller 2d6+1d8-1 -v
+2D6+1D8-1 (5 2) (6) => 12
+
 $ dieroller 3d6+2 --json --seed 42
-{"notation":"3D6+2","rolled":[4,1,3],"kept":[4,3,1],"subtotal":8,"total":10}
+{"notation":"3D6+2","groups":[{"notation":"3D6","rolled":[4,1,3],"kept":[4,3,1],"sum":8}],"subtotal":10,"total":10}
 ```
+
+Each dice group gets its own parentheses in verbose output and its own object
+under `groups` in JSON, so a single-group expression reads exactly as it always
+has.
 
 ## pathfinder-character
 
@@ -192,42 +222,54 @@ Writes `legal_scores.csv` (12,376 spreads of scores 7..18) and `uniq_scores.csv`
 (15,890,700 spreads of scores 1..45), each row carrying total purchase cost, total ability
 bonus, and the six scores.
 
-## Differences from the Racket original
+## Relationship to the Racket implementation
 
-Behavior is otherwise identical, including every validation message.
+The [Racket implementation](https://github.com/dmcbane/dieroller-rkt) has been
+brought in step with this one, so the two now accept the same arguments, produce
+the same notation strings, and report the same validation messages. The
+remaining differences are additions this port has and Racket does not:
 
 | | Racket | Elixir |
 |---|---|---|
-| Dice notation | not supported | `4d6k3+2` accepted as a single argument |
 | JSON output | not supported | `--json` on both commands |
 | Reproducible rolls | not supported | `--seed <n>` on both commands |
-| Flags after positional arguments | `dieroller 5 -v` reads `-v` as the `<sides>` argument and crashes | accepted in any position |
-| Validation errors | stdout, exit 0 | stderr, exit 1 |
-| `pathfinder-character` plain output | one raw list-of-lists on a single line | one character per line |
-| `pathfinder-character -v` | prints a stray `'((7 9 9 4 10 15) ...)` line after the report | no stray line |
-| `--keep 0` | silently became `--keep <dice>` | rejected, as the help text always said |
-| Unknown `--purchase` type | silently became `low` | rejected |
-| Purchase spread table | memoized 12⁶ brute force at runtime | enumerated at compile time |
-| `all_scores.csv` | 45⁶ ≈ 8.3 billion rows; never finishes | not generated (see `mix help ability_scores`) |
 
-Racket's own option-parsing errors (an unknown flag, or two generation methods at once)
-already exit 1; only its application-level validation messages exited 0.
+Both implementations gained the following, and both were verified against the
+other at each step:
 
-## Verified against the original
+- dice notation with keep/drop selectors and multiple dice groups
+- options accepted after positional arguments
+- validation errors on stderr with a non-zero exit status
+- `pathfinder-character` printing one character per line rather than a raw
+  list-of-lists dump, and no stray value line in verbose mode
+- purchase characters with their abilities shuffled, rather than always sorted
+  so that STR was the best stat
+- `--keep 0` and an unrecognised `--purchase` type rejected rather than silently
+  coerced
+- the purchase spread table built from combinations with repetition (12,376
+  spreads) rather than a 12^6 = 2,985,984 brute force
+- `all_scores.csv`, which enumerated 45^6 orderings and never finished, dropped
 
-Checked directly against Racket 8.16 running the original sources:
+## Verified against the Racket implementation
 
-- **Purchase spread table** — dumped using the original's own `legal-purchase-uniq-sets`,
-  `ability->cost`, and `ability->bonus-points`, then diffed against this port's compile-time
-  table. All 12,376 `(cost, bonus, spread)` triples are byte-identical (same MD5).
-- **Ability tables** — cost and bonus for all 45 scores, identical.
-- **Dice notation strings** — identical for every argument form, including the `+0`
-  suppression and unsigned-modifier cases.
-- **Validation messages** — all nine messages plus both hint lines match byte for byte.
-- **Roll distributions** — 18,000 sampled 4D6-keep-3 scores track the exact theoretical
-  distribution (χ² = 17.8 on 15 dof; critical value 30.6 at p = 0.01), as does Racket's.
-- **Pool weighting** — per-ability means for `9/3/3/3/3/3` agree within sampling noise
-  (STR 15.78 vs 15.77; others 10.46 vs 10.44).
+Checked directly against Racket 8.16:
+
+- **Purchase spread table** -- dumped from the Racket implementation and diffed
+  against this port's compile-time table. All 12,376 `(cost, bonus, spread)`
+  triples are byte-identical, and the SHA-256 of that dump is pinned in
+  `apps/dice/test/dice/pathfinder/purchase_test.exs`, so the agreement is
+  enforced by the test suite without needing Racket installed.
+- **Ability tables** -- cost and bonus for all 45 scores, identical.
+- **Notation strings** -- identical for every argument form, legacy and new,
+  including the `+0` suppression and drop-to-keep canonicalisation.
+- **Validation messages** -- every message and both hint lines match byte for
+  byte.
+- **Roll distributions** -- 18,000 sampled 4D6-keep-3 scores track the exact
+  theoretical distribution (chi-square 17.8 on 15 dof; critical value 30.6 at
+  p = 0.01). `2d20kl1` and `2d20kh1` land on their theoretical means of 7.175
+  and 13.825 in both implementations.
+- **CSV output** -- `mix ability_scores --legal-only` and
+  `racket all_ability_scores.rkt --legal-only` produce identical files.
 
 ## License
 

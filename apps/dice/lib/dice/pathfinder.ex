@@ -124,7 +124,16 @@ defmodule Dice.Pathfinder do
   defp validate_count(count) when is_integer(count) and count > 0, do: :ok
   defp validate_count(_), do: {:error, "number of characters must be greater than 0."}
 
-  defp generator({:purchase, points}), do: {:ok, fn -> Purchase.generate(points) end}
+  # Spreads are stored sorted descending so they deduplicate as multisets. Handed
+  # to a character in that order, STR would always be the highest ability, so the
+  # assignment order is randomised here, at the boundary where a spread becomes a
+  # character rather than in the table itself.
+  defp generator({:purchase, points}) do
+    {:ok,
+     fn ->
+       with {:ok, spread} <- Purchase.generate(points), do: {:ok, Enum.shuffle(spread)}
+     end}
+  end
 
   defp generator(method) do
     with {:ok, specs} <- ability_specs(method) do

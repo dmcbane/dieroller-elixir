@@ -16,8 +16,17 @@ defmodule DierollerCLI.Help do
     or
       <dice> <sides> <modifier> <keep>
 
-    <notation> is standard dice notation: <dice>d<sides>[k<keep>][<modifier>],
-    for example 3d6, 4d6k3, or 4d6k3+2.
+    <notation> is standard dice notation:
+
+      <dice>d<sides>[<selector>]  combined with + and -, optionally scaled by *n
+
+      <selector> is one of
+        k<n>, kh<n>  keep the highest <n> dice (k defaults to highest)
+        kl<n>        keep the lowest <n> dice   (roll with disadvantage)
+        dl<n>        drop the lowest <n> dice
+        dh<n>        drop the highest <n> dice
+
+    for example 3d6, 4d6k3, 4d6k3+2, 2d20kl1, 4d6dl1, or 2d6+1d8-1.
 
     See the --dice, --sides, and --modifier parameters for details.
 
@@ -28,6 +37,9 @@ defmodule DierollerCLI.Help do
       dieroller 3 6 +3
       dieroller 3 6 +6 2
       dieroller 4d6k3
+      dieroller 2d20kl1
+      dieroller 4d6dl1
+      dieroller 2d6+1d8-1
       dieroller 3d6+2 --json
       dieroller --dice 5 --sides 100 --modifier +4 --keep 3
       dieroller --dice 4 --sides 6 --keep 3

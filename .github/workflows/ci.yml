@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  # Kept in step with .tool-versions.
+  OTP_VERSION: "28.3"
+  ELIXIR_VERSION: "1.19.4"
+  ZIG_VERSION: "0.16.0"
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Cache deps and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+
+      - run: mix deps.get
+
+      - name: Check formatting
+        run: mix format --check-formatted
+
+      - name: Compile without warnings
+        run: mix compile --warnings-as-errors
+
+      # --include slow runs the 12^6 brute force that proves the compile-time
+      # purchase table still matches the Racket original's algorithm.
+      - name: Run tests
+        run: mix test --include slow
+
+      - name: Generate the ability score table
+        run: |
+          mix ability_scores --out ./csv --legal-only
+          test "$(wc -l < csv/legal_scores.csv)" -eq 12377
+
+  release:
+    name: Standalone binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      # Burrito cross-compiles its launcher with Zig, and requires this exact
+      # version.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - run: mix deps.get
+
+      - name: Build releases
+        run: |
+          MIX_ENV=prod mix release dieroller --overwrite
+          MIX_ENV=prod mix release pathfinder_character --overwrite
+
+      - name: Smoke test the binaries
+        run: |
+          ./burrito_out/dieroller_linux 4d6k3 -v
+          ./burrito_out/dieroller_linux 2d6+1d8-1 -v
+          ./burrito_out/dieroller_linux 2d20kl1 -v
+          ./burrito_out/pathfinder_character_linux -p epic -n 2 -v
+          # A validation failure must exit non-zero.
+          if ./burrito_out/dieroller_linux 3 6 +6 7; then exit 1; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-binaries
+          path: burrito_out/
