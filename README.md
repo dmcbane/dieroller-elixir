@@ -229,6 +229,10 @@ Requires Erlang/OTP 28 and Elixir 1.19; `.tool-versions` pins the exact versions
 
 ### Standalone binaries
 
+[Tagged releases](https://github.com/dmcbane/dieroller-elixir/releases) carry prebuilt
+Linux x86-64 binaries and a `SHA256SUMS` file, attached by CI from the same build it
+smoke tested. To build your own:
+
 Self-contained executables that need no Erlang installed on the target machine, the
 equivalent of Racket's `raco exe`. This needs [Zig](https://ziglang.org) 0.16.0, which
 `.tool-versions` also pins:
