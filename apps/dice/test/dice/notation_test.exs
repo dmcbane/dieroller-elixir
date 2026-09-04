@@ -12,6 +12,11 @@ defmodule Dice.NotationTest do
     Expr.notation(expr)
   end
 
+  defp batch(text) do
+    {:ok, batch} = Notation.parse_roll(text)
+    batch
+  end
+
   defp only_spec(text) do
     {:ok, expr} = Notation.parse(text)
     [spec] = Expr.specs(expr)
@@ -151,6 +156,69 @@ defmodule Dice.NotationTest do
         # Reparsing the rendered form must land on the same expression.
         assert {:ok, ^expr} = Notation.parse(Expr.notation(expr))
       end
+    end
+  end
+
+  describe "parse_roll/1" do
+    test "reads a repeat count" do
+      assert %{repeat: 6, aggregate: nil} = batch("6x4d6k3")
+      assert Expr.notation(batch("6x4d6k3").expr) == "4D6K3"
+    end
+
+    test "defaults the repeat count to one" do
+      assert %{repeat: 1, aggregate: nil} = batch("4d6k3")
+    end
+
+    test "reads a parenthesised aggregate" do
+      assert %{repeat: 6, aggregate: :sum} = batch("sum(6x4d6k3)")
+      assert Expr.notation(batch("sum(6x4d6k3)").expr) == "4D6K3"
+    end
+
+    test "reads the colon form, which needs no shell quoting" do
+      assert batch("sum:6x4d6k3") == batch("sum(6x4d6k3)")
+    end
+
+    test "accepts an aggregate without a repeat count" do
+      assert %{repeat: 1, aggregate: :avg} = batch("avg(4d6k3)")
+    end
+
+    test "is case insensitive and tolerates whitespace" do
+      assert batch("SUM ( 6 X 4d6k3 )") == batch("sum(6x4d6k3)")
+    end
+
+    test "resolves every alias to its kind" do
+      assert %{aggregate: :high} = batch("max:2x1d20")
+      assert %{aggregate: :low} = batch("min:2x1d20")
+      assert %{aggregate: :avg} = batch("mean:2x1d20")
+      assert %{aggregate: :median} = batch("med:2x1d20")
+    end
+
+    test "rejects an unknown aggregate by name" do
+      assert Notation.parse_roll("worst(6x4d6k3)") ==
+               {:error, ~s(unknown aggregate "worst"; use sum, avg, high, low, or median.)}
+    end
+
+    test "rejects a repeat count of zero" do
+      assert Notation.parse_roll("0x3d6") == {:error, "repeat count must be greater than 0."}
+      assert Notation.parse_roll("sum(0x3d6)") == {:error, "repeat count must be greater than 0."}
+    end
+
+    test "insists on at least one dice group, unlike parse/1" do
+      assert {:ok, _} = Notation.parse("7")
+      assert {:error, message} = Notation.parse_roll("7")
+      assert message =~ "expression contains no dice"
+      assert {:error, message} = Notation.parse_roll("sum(3x2)")
+      assert message =~ ~s|expression contains no dice: "sum(3x2)"|
+    end
+
+    test "an unclosed aggregate is just unparseable notation" do
+      assert {:error, message} = Notation.parse_roll("sum(4d6")
+      assert message =~ "could not parse dice notation"
+    end
+
+    test "propagates spec validation errors from inside an aggregate" do
+      assert Notation.parse_roll("sum(3x2d6k5)") ==
+               {:error, "dice must be greater than or equal to keep."}
     end
   end
 

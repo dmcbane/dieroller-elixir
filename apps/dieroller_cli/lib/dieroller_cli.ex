@@ -10,9 +10,13 @@ defmodule DierollerCLI do
   lazy stream of output chunks or an error message. `main/1` is the only part
   that touches IO and process exit status, which keeps the whole CLI testable
   in-process while letting a large repeat count stream rather than buffer.
+
+  An aggregated roll -- `sum(6x4d6k3)` -- is the one thing that cannot stream
+  all the way, since its answer depends on every roll; only its summary waits,
+  and under `--verbose` the rolls still appear as they are made.
   """
 
-  alias Dice.{Expr, Notation, Spec}
+  alias Dice.{Aggregate, Batch, Expr, Notation, Spec}
   alias DierollerCLI.Help
 
   @version Mix.Project.config()[:version]
@@ -70,9 +74,9 @@ defmodule DierollerCLI do
   end
 
   defp roll(opts, args) do
-    with {:ok, {repeat, expr}} <- expression(args) do
+    with {:ok, batch} <- expression(args) do
       if seed = opts[:seed], do: Dice.seed(seed)
-      {:ok, render(expr, repeat, opts)}
+      {:ok, render(batch, opts)}
     end
   end
 
@@ -118,20 +122,70 @@ defmodule DierollerCLI do
       ~s(for example: dieroller "#{Enum.join(args, " ")}")
   end
 
-  defp render(expr, repeat, opts) do
-    notation = Expr.notation(expr)
+  # Without an aggregate each roll is a line of its own, so the output stays
+  # lazy and a huge repeat count costs nothing until it is drained.
+  defp render(%Batch{aggregate: nil} = batch, opts) do
+    format = per_roll(Batch.notation(batch), opts)
 
-    format =
-      cond do
-        opts[:json] -> &json_line(&1, notation)
-        opts[:verbose] -> &verbose_line(&1, notation)
-        true -> &"#{&1.total}\n"
-      end
+    batch |> Dice.stream() |> Stream.map(format)
+  end
 
-    expr
-    |> Dice.stream()
-    |> Stream.map(format)
-    |> Stream.take(repeat)
+  # An aggregate is a property of the whole batch, so it cannot report anything
+  # until the last roll is in. The rolls themselves still stream past as they
+  # are made; the summary is appended once the batch is exhausted.
+  defp render(%Batch{} = batch, opts) do
+    show = rolls_shown(batch, opts)
+
+    Stream.transform(
+      Dice.stream(batch),
+      fn -> [] end,
+      fn outcome, totals -> {show.(outcome), [outcome.total | totals]} end,
+      fn totals -> {[summary(Enum.reverse(totals), batch, opts)], totals} end,
+      fn _totals -> :ok end
+    )
+  end
+
+  defp per_roll(notation, opts) do
+    cond do
+      opts[:json] -> &json_line(&1, notation)
+      opts[:verbose] -> &verbose_line(&1, notation)
+      true -> &"#{&1.total}\n"
+    end
+  end
+
+  # Verbose shows the rolls behind an aggregate as they happen. JSON does not:
+  # its summary object already lists every total, and one object per line is
+  # what the un-aggregated form means.
+  defp rolls_shown(%Batch{expr: expr}, opts) do
+    if opts[:verbose] && !opts[:json] do
+      notation = Expr.notation(expr)
+      &[verbose_line(&1, notation)]
+    else
+      fn _outcome -> [] end
+    end
+  end
+
+  defp summary(totals, %Batch{aggregate: kind} = batch, opts) do
+    notation = Batch.notation(batch)
+    value = Aggregate.reduce(kind, totals)
+
+    cond do
+      opts[:json] ->
+        JSON.encode!(%{
+          notation: notation,
+          aggregate: Atom.to_string(kind),
+          expression: Expr.notation(batch.expr),
+          repeat: batch.repeat,
+          rolls: totals,
+          value: value
+        }) <> "\n"
+
+      opts[:verbose] ->
+        "#{notation} => #{Aggregate.format(kind, totals)}\n"
+
+      true ->
+        "#{Aggregate.format(kind, totals)}\n"
+    end
   end
 
   # One parenthesised group per dice term, so a single-group expression reads

@@ -5,7 +5,11 @@ defmodule Dice.Notation do
 
   The grammar is
 
-      roll       := (integer 'x')? expression
+      roll       := aggregate '(' repeated ')'
+                  | aggregate ':' repeated
+                  | repeated
+      repeated   := (integer 'x')? expression
+      aggregate  := 'sum' | 'avg' | 'high' | 'low' | 'median' | alias
       expression := term (('+' | '-') term)* ('*' integer)?
       term       := dice | integer
       dice       := integer 'd' integer selector?
@@ -21,11 +25,17 @@ defmodule Dice.Notation do
   of the expression itself and does not appear in the rendered notation, since
   that describes a single roll.
 
+  An aggregate wraps the whole thing and reduces those repeats to one number:
+  `sum(6x4d6k3)`, `avg(100x1d20)`, `high(2x1d20)`. The parenthesised form is the
+  one to reach for, but a shell will eat unquoted parentheses, so `sum:6x4d6k3`
+  means exactly the same thing and needs no quoting. See `Dice.Aggregate` for
+  the kinds and their aliases.
+
   Dropping is stored as keeping from the opposite end, so `4d6dl1` and `4d6k3`
   produce the same spec and both render as `4D6K3`.
   """
 
-  alias Dice.{Expr, Spec}
+  alias Dice.{Aggregate, Batch, Expr, Spec}
 
   @token ~r/^([-+*])?(\d+[dD]\d+(?:[kK][hHlL]?\d+|[dD][hHlL]\d+)?|\d+)/
 
@@ -33,47 +43,89 @@ defmodule Dice.Notation do
 
   @repeat ~r/^(\d+)[xX](.+)$/
 
+  @aggregate ~r/^(?<name>[a-zA-Z]+)(?:\((?<paren>.*)\)|:(?<colon>.+))$/
+
   @ops %{"+" => :+, "-" => :-, "*" => :*}
 
   @doc """
-  Parses a whole roll: an optional `<n>x` repeat count, then an expression.
+  Parses a whole roll: an optional aggregate, an optional `<n>x` repeat count,
+  then an expression.
 
   Unlike `parse/1` this insists the expression contain at least one dice group,
   so a bare constant is reported rather than silently rolling nothing.
 
-      iex> {:ok, {repeat, expr}} = Dice.Notation.parse_roll("6x4d6k3")
-      iex> {repeat, Dice.Expr.notation(expr)}
-      {6, "4D6K3"}
+      iex> {:ok, batch} = Dice.Notation.parse_roll("6x4d6k3")
+      iex> {batch.repeat, batch.aggregate, Dice.Expr.notation(batch.expr)}
+      {6, nil, "4D6K3"}
 
-      iex> {:ok, {repeat, expr}} = Dice.Notation.parse_roll("2d6+1d8-1")
-      iex> {repeat, Dice.Expr.notation(expr)}
+      iex> {:ok, batch} = Dice.Notation.parse_roll("2d6+1d8-1")
+      iex> {batch.repeat, Dice.Expr.notation(batch.expr)}
       {1, "2D6+1D8-1"}
+
+      iex> {:ok, batch} = Dice.Notation.parse_roll("sum(6x4d6k3)")
+      iex> {batch.repeat, batch.aggregate}
+      {6, :sum}
+
+      iex> {:ok, batch} = Dice.Notation.parse_roll("avg:100x1d20")
+      iex> {batch.repeat, batch.aggregate}
+      {100, :avg}
 
       iex> Dice.Notation.parse_roll("0x3d6")
       {:error, "repeat count must be greater than 0."}
 
       iex> Dice.Notation.parse_roll("7")
       {:error, ~s(expression contains no dice: "7")}
+
+      iex> Dice.Notation.parse_roll("worst(6x4d6k3)")
+      {:error, ~s(unknown aggregate "worst"; use sum, avg, high, low, or median.)}
   """
-  @spec parse_roll(String.t()) :: {:ok, {pos_integer(), Expr.t()}} | {:error, String.t()}
+  @spec parse_roll(String.t()) :: {:ok, Batch.t()} | {:error, String.t()}
   def parse_roll(string) do
     trimmed = String.trim(string)
 
-    {repeat, rest} =
-      case Regex.run(@repeat, strip(trimmed), capture: :all_but_first) do
-        [count, rest] -> {String.to_integer(count), rest}
-        nil -> {1, trimmed}
-      end
+    with {:ok, kind, rest} <- aggregate(strip(trimmed)),
+         {:ok, repeat, rest} <- repeat(rest),
+         {:ok, expr} <- parse_reported_as(rest, trimmed),
+         :ok <- dice_present(expr, trimmed) do
+      {:ok, %Batch{expr: expr, repeat: repeat, aggregate: kind}}
+    end
+  end
 
-    if repeat < 1 do
-      {:error, "repeat count must be greater than 0."}
-    else
-      with {:ok, expr} <- parse(rest) do
-        case Expr.specs(expr) do
-          [] -> {:error, ~s(expression contains no dice: "#{trimmed}")}
-          _ -> {:ok, {repeat, expr}}
+  # An aggregate wraps the whole roll rather than sitting inside the
+  # expression, so it is peeled off before anything else is parsed. The `:`
+  # spelling exists because a shell would eat unquoted parentheses.
+  defp aggregate(text) do
+    case Regex.named_captures(@aggregate, text) do
+      nil ->
+        {:ok, nil, text}
+
+      %{"name" => name, "paren" => paren, "colon" => colon} ->
+        case Aggregate.parse(name) do
+          {:ok, kind} -> {:ok, kind, if(colon == "", do: paren, else: colon)}
+          :error -> {:error, unknown_aggregate(name)}
         end
-      end
+    end
+  end
+
+  defp unknown_aggregate(name) do
+    {last, rest} = List.pop_at(Aggregate.names(), -1)
+    ~s(unknown aggregate "#{name}"; use #{Enum.join(rest, ", ")}, or #{last}.)
+  end
+
+  defp repeat(text) do
+    case Regex.run(@repeat, text, capture: :all_but_first) do
+      nil -> {:ok, 1, text}
+      [count, rest] -> counted(String.to_integer(count), rest)
+    end
+  end
+
+  defp counted(count, _rest) when count < 1, do: {:error, "repeat count must be greater than 0."}
+  defp counted(count, rest), do: {:ok, count, rest}
+
+  defp dice_present(expr, original) do
+    case Expr.specs(expr) do
+      [] -> {:error, ~s(expression contains no dice: "#{original}")}
+      _ -> :ok
     end
   end
 
@@ -97,11 +149,14 @@ defmodule Dice.Notation do
       "2D6+1D8-1"
   """
   @spec parse(String.t()) :: {:ok, Expr.t()} | {:error, String.t()}
-  def parse(string) do
-    stripped = strip(string)
+  def parse(string), do: parse_reported_as(string, string)
 
-    with {:ok, tokens} <- scan(stripped, string, []) do
-      build(tokens, string)
+  # By the time `parse_roll/1` gets here it has stripped the whitespace and
+  # peeled off the aggregate and the repeat count, none of which the roller
+  # wants to see quoted back at them: an error names the roll as it was written.
+  defp parse_reported_as(string, original) do
+    with {:ok, tokens} <- scan(strip(string), original, []) do
+      build(tokens, original)
     end
   end
 

@@ -7,7 +7,7 @@ defmodule Dice do
   RNG, which `seed/1` makes reproducible.
   """
 
-  alias Dice.{Expr, Outcome, Roll, Spec}
+  alias Dice.{Batch, Expr, Outcome, Roll, Spec}
 
   @doc """
   Rolls a spec once.
@@ -66,13 +66,22 @@ defmodule Dice do
   defp combine(:-, sum, value), do: sum - value
 
   @doc """
-  An infinite lazy stream of rolls of the same expression.
+  A lazy stream of rolls of the same expression or spec.
 
-  The CLI's `--iterations` is `Enum.take/2` over this.
+  Given an expression or a spec the stream is infinite, and a caller bounds it
+  with `Enum.take/2`. Given a `Dice.Batch` it is already bounded by the batch's
+  repeat count, since that is what the count is for.
+
+      iex> Dice.seed(3)
+      iex> {:ok, batch} = Dice.Notation.parse_roll("6x1d1")
+      iex> batch |> Dice.stream() |> Enum.map(& &1.total)
+      [1, 1, 1, 1, 1, 1]
   """
-  @spec stream(Expr.t() | Spec.t()) :: Enumerable.t()
+  @spec stream(Batch.t() | Expr.t() | Spec.t()) :: Enumerable.t()
   def stream(%Expr{} = expr), do: Stream.repeatedly(fn -> roll_expr(expr) end)
   def stream(%Spec{} = spec), do: Stream.repeatedly(fn -> roll(spec) end)
+
+  def stream(%Batch{expr: expr, repeat: repeat}), do: expr |> stream() |> Stream.take(repeat)
 
   @doc """
   Seeds the calling process's RNG so a run is reproducible.

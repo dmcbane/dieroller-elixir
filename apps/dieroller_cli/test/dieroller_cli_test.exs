@@ -87,6 +87,94 @@ defmodule DierollerCLITest do
     end
   end
 
+  describe "aggregates" do
+    test "reduce the repeated rolls to one number" do
+      assert lines("sum(6x1d1)") == ["6"]
+      assert lines("avg(6x1d1)") == ["1"]
+      assert lines("high(6x1d1)") == ["1"]
+      assert lines("low(6x1d1)") == ["1"]
+      assert lines("median(6x1d1)") == ["1"]
+    end
+
+    test "the colon form means the same as the parenthesised one" do
+      assert run("sum:6x1d1") == run("sum(6x1d1)")
+    end
+
+    test "summarise exactly the rolls they replace" do
+      rolls = "6x1d20 --seed 99" |> lines() |> Enum.map(&String.to_integer/1)
+
+      assert lines("sum:6x1d20 --seed 99") == [to_string(Enum.sum(rolls))]
+      assert lines("high:6x1d20 --seed 99") == [to_string(Enum.max(rolls))]
+      assert lines("low:6x1d20 --seed 99") == [to_string(Enum.min(rolls))]
+    end
+
+    test "an average is rounded to two places" do
+      # 7 + 1 + 15 over three rolls is 7.666..., which is as much precision as
+      # three twenty-sided dice can honestly claim.
+      assert lines("3x1d20 --seed 1") == ~w(7 1 15)
+      assert lines("avg:3x1d20 --seed 1") == ["7.67"]
+    end
+
+    test "an average that lands on a whole number loses the decimal point" do
+      assert lines("avg(2x1d1+1)") == ["2"]
+    end
+
+    test "an aggregate without a repeat count is the single roll" do
+      assert lines("sum(3d1)") == ["3"]
+    end
+
+    test "verbose shows each roll and then the summary" do
+      assert run("sum(3x1d1) -v") ==
+               {:ok, "1D1 (1) => 1\n1D1 (1) => 1\n1D1 (1) => 1\nSUM(3x1D1) => 3\n"}
+    end
+
+    test "json emits one object for the whole batch" do
+      assert {:ok, out} = run("sum(3x2d1) --json")
+
+      assert JSON.decode!(out) == %{
+               "notation" => "SUM(3x2D1)",
+               "aggregate" => "sum",
+               "expression" => "2D1",
+               "repeat" => 3,
+               "rolls" => [2, 2, 2],
+               "value" => 6
+             }
+    end
+
+    test "json reports the exact value, not the rounded one" do
+      assert {:ok, out} = run("avg(3x1d1) --json")
+      assert JSON.decode!(out)["value"] == 1.0
+    end
+
+    test "json wins over verbose, as it does for a plain roll" do
+      assert run("sum(3x1d1) --json -v") == run("sum(3x1d1) --json")
+    end
+
+    test "every alias reaches its canonical notation" do
+      assert {:ok, out} = run("max:2x1d1 -v")
+      assert out =~ "HIGH(2x1D1) => 1"
+
+      assert {:ok, out} = run("mean:2x1d1 -v")
+      assert out =~ "AVG(2x1D1) => 1"
+    end
+
+    test "an aggregate is still lazy until it is drained" do
+      assert {:ok, _output} = DierollerCLI.run(["sum:100000000x1d6"])
+    end
+
+    test "rejects an unknown aggregate" do
+      assert run("worst(6x4d6k3)") ==
+               {:error, ~s|unknown aggregate "worst"; use sum, avg, high, low, or median.|}
+    end
+
+    test "propagates the errors of the roll it wraps" do
+      assert run("sum(0x1d6)") == {:error, "repeat count must be greater than 0."}
+      assert run("sum(3x2d6k5)") == {:error, "dice must be greater than or equal to keep."}
+      assert {:error, message} = run("sum(3x2)")
+      assert message =~ "expression contains no dice"
+    end
+  end
+
   describe "output" do
     test "defaults to the total alone" do
       assert run("3d1") == {:ok, "3\n"}

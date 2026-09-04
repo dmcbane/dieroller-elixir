@@ -7,7 +7,8 @@ and a Pathfinder character generator for tabletop RPG players.
 
 Two commands are built from this repository:
 
-- **`dieroller`** — roll N dice of S sides, keep the highest K, apply a modifier, repeat.
+- **`dieroller`** — roll N dice of S sides, keep the highest K, apply a modifier, repeat,
+  and optionally reduce those repeats to their sum, average, median, or extreme.
 - **`pathfinder-character`** — generate Pathfinder ability scores by the classic, standard,
   heroic, pool, or purchase method.
 
@@ -44,7 +45,11 @@ dieroller [ <option> ... ] <roll>
 ### Dice notation
 
 ```
-roll       := (integer 'x')? expression
+roll       := aggregate '(' repeated ')'
+            | aggregate ':' repeated
+            | repeated
+repeated   := (integer 'x')? expression
+aggregate  := 'sum' | 'avg' | 'high' | 'low' | 'median'   -- or an alias
 expression := term (('+' | '-') term)* ('*' integer)?
 term       := dice | integer
 dice       := integer 'd' integer selector?
@@ -65,6 +70,10 @@ selector   := 'k' ('h' | 'l')? integer     -- keep, defaulting to highest
 | `2d6+1d8-1` | several groups and constants |
 | `3d6*2` | double the total of the kept dice |
 | `6x4d6k3` | roll the same expression six times |
+| `sum(6x4d6k3)` | add those six rolls together |
+| `sum:6x4d6k3` | the same, with nothing for a shell to eat |
+| `avg:100x1d20` | the average of a hundred rolls |
+| `max:2x1d20` | the better of two rolls |
 
 A modifier applies to the sum of the kept dice, not to each die, so `3d6*2`
 doubles the total rather than rolling `3d12`. Drop always needs its direction
@@ -74,6 +83,46 @@ both display as `4D6K3`.
 
 The repeat count is not part of the expression and does not appear in the
 rendered notation, which describes a single roll.
+
+### Aggregating repeated rolls
+
+`6x4d6k3` reports six rolls. An aggregate wraps the whole thing and reports one
+number instead:
+
+| aggregate | aliases | what it reports |
+|---|---|---|
+| `sum` | `total` | every roll added together |
+| `avg` | `average`, `mean` | their average, rounded to two places |
+| `high` | `highest`, `max` | the best of them |
+| `low` | `lowest`, `min` | the worst of them |
+| `median` | `med` | the middle one |
+
+Most shells treat unquoted parentheses as syntax of their own -- fish reads
+`(...)` as command substitution, bash as a subshell -- so either quote the whole
+roll or use the colon form, which parses identically:
+
+```console
+$ dieroller "sum(6x4d6k3)"
+71
+
+$ dieroller sum:6x4d6k3
+68
+```
+
+Unlike the repeat count, an aggregate *does* appear in the rendered notation,
+and it takes the repeat with it: a sum of six rolls is a property of all six,
+not of any one of them, so it renders as `SUM(6x4D6K3)`. Aliases canonicalise
+the way `kh` does, so `max:2x1d20` renders as `HIGH(2x1D20)`.
+
+An average is rounded to two places, in whole hundredths rather than by scaling
+a float. Forty rolls totalling three average exactly 0.075, which rounds to
+`0.08`; the nearest double to 0.075 is a hair below it, so `Float.round/2` would
+report `0.07` instead. The Racket implementation reduces in exact rationals for
+the same reason, so the two agree on every value.
+
+An aggregate needs every roll before it can report anything, so unlike a plain
+repeat it does not stream. Under `--verbose` the rolls still appear as they are
+made and the summary follows them.
 
 ### Examples
 
@@ -97,7 +146,26 @@ $ dieroller "2d6 + 1d8"          # quote it if you write spaces
 
 $ dieroller 3d6+2 --json --seed 42
 {"notation":"3D6+2","groups":[{"notation":"3D6","rolled":[4,1,3],"kept":[4,3,1],"sum":8}],"subtotal":10,"total":10}
+
+$ dieroller "sum(6x4d6k3)" --verbose --seed 7
+4D6K3 (6 4 4) => 14
+4D6K3 (6 4 2) => 12
+4D6K3 (1 1 1) => 3
+4D6K3 (6 6 4) => 16
+4D6K3 (5 3 2) => 10
+4D6K3 (5 4 3) => 12
+SUM(6x4D6K3) => 67
+
+$ dieroller avg:6x4d6k3 --seed 7
+11.17
+
+$ dieroller avg:6x4d6k3 --json --seed 7
+{"value":11.166666666666666,"aggregate":"avg","expression":"4D6K3","notation":"AVG(6x4D6K3)","repeat":6,"rolls":[14,12,3,16,10,12]}
 ```
+
+An aggregated `--json` roll is one object for the batch rather than one per
+roll, carrying each roll's total under `rolls` and the exact, unrounded result
+under `value`; only the text output rounds.
 
 Each dice group gets its own parentheses in verbose output and its own object
 under `groups` in JSON, so a single-group expression reads exactly as it always
@@ -237,6 +305,7 @@ Both implementations gained the following, and both were verified against the
 other at each step:
 
 - dice notation with keep/drop selectors and multiple dice groups
+- aggregating a repeated roll: `sum(6x4d6k3)`, `avg:100x1d20`, `high:2x1d20`
 - options accepted after positional arguments
 - validation errors on stderr with a non-zero exit status
 - `pathfinder-character` printing one character per line rather than a raw
@@ -260,7 +329,11 @@ Checked directly against Racket 8.16:
   enforced by the test suite without needing Racket installed.
 - **Ability tables** -- cost and bonus for all 45 scores, identical.
 - **Notation strings** -- identical for every argument form, legacy and new,
-  including the `+0` suppression and drop-to-keep canonicalisation.
+  including the `+0` suppression, drop-to-keep canonicalisation, and the
+  `SUM(6x4D6K3)` rendering of an aggregate.
+- **Aggregate values** -- identical for every kind. Racket reduces in exact
+  rationals; this port rounds in whole hundredths to reach the same answers
+  without a flonum in the way.
 - **Validation messages** -- every message and both hint lines match byte for
   byte.
 - **Roll distributions** -- 18,000 sampled 4D6-keep-3 scores track the exact
